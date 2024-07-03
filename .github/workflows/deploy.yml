@@ -1,0 +1,116 @@
+name: Deploy Process of Cherryshades-test
+
+on:
+  push:
+    branches: [ "master" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: '16'
+
+    - name: Install Git
+      run: sudo apt-get install -y git
+
+    - name: Clone Repository
+      run: |
+        git clone https://github.com/Manjunath-Gowdar/cherryshades-test.git
+        cd cherryshades-test
+
+    - name: Install backend dependencies
+      run: npm install
+      working-directory: cherryshades-test
+
+    - name: Install frontend dependencies and build
+      run: |
+        cd frontend
+        npm install
+        npm run build
+      working-directory: cherryshades-test
+
+    - name: Install PM2
+      run: npm install pm2 -g
+
+    - name: Prepare SSH Key
+      run: |
+        echo "$SSH_KEY" > deploy_key.pem
+        chmod 600 deploy_key.pem
+
+    - name: Add SSH Key to SSH Agent
+      run: |
+        eval $(ssh-agent -s)
+        ssh-add deploy_key.pem
+      shell: bash
+
+    - name: Verify SSH Key
+      run: ssh-keygen -lf deploy_key.pem
+
+    - name: Add EC2 Host to Known Hosts
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan $EC2_HOST >> ~/.ssh/known_hosts
+
+    - name: Test SSH Connection
+      run: |
+        ssh -i deploy_key.pem $EC2_USER@$EC2_HOST "echo 'SSH connection successful!'"
+      shell: bash
+
+    - name: Create Remote Directory
+      run: |
+        ssh -i deploy_key.pem $EC2_USER@$EC2_HOST "mkdir -p /home/ubuntu/cherryshades-test"
+      shell: bash
+
+    - name: List Directory Contents
+      run: ls -al
+
+    - name: Install rsync
+      run: sudo apt-get install -y rsync
+
+    - name: Copy Files to EC2
+      run: |
+        rsync -avz --exclude-from='.scpignore' -e "ssh -i deploy_key.pem" cherryshades-test/ $EC2_USER@$EC2_HOST:/home/ubuntu/cherryshades-test/
+      shell: bash
+
+    - name: Adjust permissions on EC2
+      run: |
+        ssh -i deploy_key.pem $EC2_USER@$EC2_HOST "sudo chown -R $EC2_USER:$EC2_USER /home/ubuntu/cherryshades-test/frontend/build && sudo chmod -R 755 /home/ubuntu/cherryshades-test/frontend/build"
+      shell: bash
+
+    - name: Deploy Application
+      run: |
+        ssh -i deploy_key.pem $EC2_USER@$EC2_HOST <<-EOF
+          cd /home/ubuntu/cherryshades-test
+          echo "NODE_ENV=${NODE_ENV}" > .env
+          echo "PORT=${PORT}" >> .env
+          echo "MONGO_URI=${MONGO_URI}" >> .env
+          echo "JWT_SECRET=${JWT_SECRET}" >> .env
+          echo "PAYPAL_CLIENT_ID=${PAYPAL_CLIENT_ID}" >> .env
+          npm install
+          cd frontend
+          npm install
+          npm run build
+          cd ..
+          pm2 stop ${PM2_NAME} || true
+          pm2 delete ${PM2_NAME} || true
+          pm2 start /home/ubuntu/cherryshades-test/backend/server.js --name ${PM2_NAME}
+        EOF
+      shell: bash
+
+    env:
+      SSH_KEY: ${{ secrets.SSH_KEY }}
+      EC2_USER: ${{ secrets.EC2_USER}}
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      PM2_NAME: ${{ secrets.PM2_NAME }}
+      NODE_ENV: ${{ secrets.NODE_ENV }}
+      PORT: ${{ secrets.PORT }}
+      MONGO_URI: ${{ secrets.MONGO_URI }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+      PAYPAL_CLIENT_ID: ${{ secrets.PAYPAL_CLIENT_ID }}
